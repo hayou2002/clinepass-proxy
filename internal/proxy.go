@@ -12,109 +12,123 @@ import (
 	"time"
 )
 
-// ============================================================
-// ClinePass Proxy v2.0.0 - Core Proxy Logic
-// ============================================================
-
 const (
 	clinepassBaseURL = "https://api.cline.bot/api/v1"
 	defaultTimeout   = 300 * time.Second
 )
 
-// Proxy handles request forwarding and reasoning field conversion
-type Proxy struct {
-	APIKey string
-	Debug  bool
-	Client *http.Client
-}
-
-// NewProxy creates a new proxy instance
-func NewProxy(apiKey string, debug bool) *Proxy {
-	return &Proxy{
-		Client: &http.Client{
-			Timeout: defaultTimeout,
-		},
-	}
-}
-
-func (p *Proxy) debugf(format string, args ...interface{}) {
-	if p.Debug {
-		log.Printf("[DEBUG] "+format, args...)
-	}
-}
-
-// reasoningFields lists all known reasoning field names from different providers
 var reasoningFields = []string{"reasoning", "reasoning_details", "thinking"}
 
-// moveReasoningToStandard converts any reasoning field to reasoning_content
+type Proxy struct {
+	APIKey       string
+	Debug        bool
+	ThinkingLang string
+	Client       *http.Client
+}
+
+func NewProxy(apiKey string, debug bool, thinkingLang string) *Proxy {
+	if thinkingLang == "" {
+		thinkingLang = "zh"
+	}
+	return &Proxy{
+		APIKey:       apiKey,
+		Debug:        debug,
+		ThinkingLang: thinkingLang,
+		Client:       &http.Client{Timeout: defaultTimeout},
+	}
+}
+
+func (p *Proxy) debugf(f string, a ...interface{}) {
+	if p.Debug {
+		log.Printf("[DEBUG] "+f, a...)
+	}
+}
+
 func moveReasoningToStandard(m map[string]interface{}) {
-	for _, field := range reasoningFields {
-		if val, exists := m[field]; exists {
-			if str, ok := val.(string); ok && str != "" {
-				if _, has := m["reasoning_content"]; !has {
-					m["reasoning_content"] = str
+	for _, f := range reasoningFields {
+		if v, ok := m[f]; ok {
+			if s, ok2 := v.(string); ok2 && s != "" {
+				if _, hasRC := m["reasoning_content"]; !hasRC {
+					m["reasoning_content"] = s
 				}
-				delete(m, field)
+				delete(m, f)
 			}
 		}
 	}
 }
 
-// convertReasoningInChoices processes choices array (works for both delta and message)
 func convertReasoningInChoices(choices []interface{}) {
-	for _, choice := range choices {
-		if choiceMap, ok := choice.(map[string]interface{}); ok {
-			// Handle streaming delta
-			if delta, ok := choiceMap["delta"].(map[string]interface{}); ok {
-				moveReasoningToStandard(delta)
-			}
-			// Handle non-streaming message
-			if msg, ok := choiceMap["message"].(map[string]interface{}); ok {
-				moveReasoningToStandard(msg)
-			}
+	for _, c := range choices {
+		cm, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if d, ok2 := cm["delta"].(map[string]interface{}); ok2 {
+			moveReasoningToStandard(d)
+		}
+		if msg, ok2 := cm["message"].(map[string]interface{}); ok2 {
+			moveReasoningToStandard(msg)
 		}
 	}
 }
 
-// injectReasoningParams adds provider-specific reasoning parameters
-func injectReasoningParams(reqMap map[string]interface{}, model string) {
-	modelLower := strings.ToLower(model)
-
-	if strings.Contains(modelLower, "minimax") {
-		// MiniMax M3 needs reasoning_split to output thinking content
-		if _, ok := reqMap["reasoning_split"]; !ok {
-			reqMap["reasoning_split"] = true
+func injectReasoningParams(m map[string]interface{}, model string) {
+	ml := strings.ToLower(model)
+	if strings.Contains(ml, "minimax") {
+		if _, ok := m["reasoning_split"]; !ok {
+			m["reasoning_split"] = true
 		}
 	}
-
-	if strings.Contains(modelLower, "deepseek") {
-		// DeepSeek V4 supports thinking mode toggle
-		if _, ok := reqMap["thinking"]; !ok {
-			reqMap["thinking"] = map[string]string{"type": "enabled"}
+	if strings.Contains(ml, "deepseek") {
+		if _, ok := m["thinking"]; !ok {
+			m["thinking"] = map[string]string{"type": "enabled"}
 		}
 	}
-
-	// Default to medium reasoning effort.
-	// Client can override with reasoning_effort: "high" in request body.
-	if _, ok := reqMap["reasoning_effort"]; !ok {
-		reqMap["reasoning_effort"] = "medium"
+	if _, ok := m["reasoning_effort"]; !ok {
+		m["reasoning_effort"] = "high"
 	}
 }
 
+func injectThinkingLanguage(m map[string]interface{}, lang string) {
+	if lang == "" {
+		return
+	}
+	var instruction string
+	switch lang {
+	case "zh":
+		instruction = "请始终使用中文进行思考和推理，无论用户输入的语言、读取的文件内容、代码或网页内容是什么语言，你的内部思考过程（reasoning）必须使用中文。"
+	case "en":
+		instruction = "Always think and reason in English, regardless of user input, files, code, or web content language."
+	default:
+		instruction = fmt.Sprintf("Always think and reason in %s.", lang)
+	}
+	msgs, ok := m["messages"].([]interface{})
+	if !ok || len(msgs) == 0 {
+		return
+	}
+	if fm, ok2 := msgs[0].(map[string]interface{}); ok2 {
+		if r, _ := fm["role"].(string); r == "system" {
+			if c, _ := fm["content"].(string); c != "" {
+				fm["content"] = instruction + "\n\n" + c
+				return
+			}
+		}
+	}
+	m["messages"] = append([]interface{}{
+		map[string]interface{}{"role": "system", "content": instruction},
+	}, msgs...)
+}
 
-
-// HandleChatCompletions handles /v1/chat/completions
 func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		p.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
 
-	// API key: server config > client header
 	apiKey := p.APIKey
 	if apiKey == "" {
-		if clientKey := r.Header.Get("Authorization"); clientKey != "" {
-			apiKey = strings.TrimPrefix(clientKey, "Bearer ")
+		if ck := r.Header.Get("Authorization"); ck != "" {
+			apiKey = strings.TrimPrefix(ck, "Bearer ")
 			apiKey = strings.TrimSpace(apiKey)
 		}
 	}
@@ -123,189 +137,138 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		p.writeError(w, http.StatusBadRequest, "Failed to read request body")
+		p.writeError(w, http.StatusBadRequest, "Failed to read body")
 		return
 	}
-	defer r.Body.Close()
+	r.Body.Close()
+	p.debugf("Request: %s", string(body))
 
-	p.debugf("Request body: %s", string(body))
-
-	// Parse request as raw map for processing
 	var reqMap map[string]interface{}
 	if err := json.Unmarshal(body, &reqMap); err != nil {
-		p.writeError(w, http.StatusBadRequest, "Invalid JSON in request body")
+		p.writeError(w, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
-	// Get model name for provider-specific injection
 	model, _ := reqMap["model"].(string)
-
-	// Inject reasoning parameters based on model
 	injectReasoningParams(reqMap, model)
-
-
-
-	// Re-marshal modified request
-	finalBody, err := json.Marshal(reqMap)
-	if err != nil {
-		p.writeError(w, http.StatusInternalServerError, "Failed to process request")
-		return
+	if p.ThinkingLang != "" {
+		injectThinkingLanguage(reqMap, p.ThinkingLang)
 	}
 
-	p.debugf("Forwarding to ClinePass: %s", string(finalBody))
+	finalBody, _ := json.Marshal(reqMap)
+	p.debugf("Forward: %s", string(finalBody))
 
-	// Forward to ClinePass
-	upstreamReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
+	upReq, _ := http.NewRequestWithContext(r.Context(), "POST",
 		clinepassBaseURL+"/chat/completions", bytes.NewReader(finalBody))
+	upReq.Header.Set("Content-Type", "application/json")
+	upReq.Header.Set("Authorization", "Bearer "+apiKey)
+	upReq.Header.Set("Accept", "text/event-stream")
+
+	upResp, err := p.Client.Do(upReq)
 	if err != nil {
-		p.writeError(w, http.StatusInternalServerError, "Failed to create upstream request")
+		p.writeError(w, http.StatusBadGateway, "Upstream error: "+err.Error())
+		return
+	}
+	defer upResp.Body.Close()
+
+	if upResp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(upResp.Body)
+		log.Printf("[ERROR] ClinePass %d: %s", upResp.StatusCode, string(errBody))
+		p.writeError(w, upResp.StatusCode, "ClinePass error: "+string(errBody))
 		return
 	}
 
-	upstreamReq.Header.Set("Content-Type", "application/json")
-	upstreamReq.Header.Set("Authorization", "Bearer "+apiKey)
-	upstreamReq.Header.Set("Accept", "text/event-stream")
-
-	resp, err := p.Client.Do(upstreamReq)
-	if err != nil {
-		p.writeError(w, http.StatusBadGateway, "Upstream connection error: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[ERROR] ClinePass returned %d: %s", resp.StatusCode, string(errBody))
-		p.writeError(w, resp.StatusCode, "ClinePass error: "+string(errBody))
-		return
-	}
-
-	// Determine if streaming
-	isStream := false
-	if s, ok := reqMap["stream"].(bool); ok {
-		isStream = s
-	}
-
+	isStream, _ := reqMap["stream"].(bool)
 	if isStream {
-		p.handleStream(w, r, resp)
+		p.handleStream(w, r, upResp)
 	} else {
-		p.handleNonStream(w, resp)
+		p.handleNonStream(w, upResp)
 	}
 }
 
-// handleStream processes streaming SSE response with reasoning field conversion
-func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, upstream *http.Response) {
+func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, up *http.Response) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		p.writeError(w, http.StatusInternalServerError, "Streaming not supported")
+		p.writeError(w, http.StatusInternalServerError, "Streaming unsupported")
 		return
 	}
-
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 
-	scanner := bufio.NewScanner(upstream.Body)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
+	sc := bufio.NewScanner(up.Body)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
 		select {
 		case <-r.Context().Done():
 			return
 		default:
 		}
-
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(sc.Text())
 		if line == "" || !strings.HasPrefix(line, "data: ") {
 			continue
 		}
-
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
 			fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 			continue
 		}
-
-		// Parse, convert reasoning fields, re-marshal
 		var chunk map[string]interface{}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			// Can't parse - pass through as-is
 			fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 			continue
 		}
-
-		// Convert reasoning fields in delta
-		if choices, ok := chunk["choices"].([]interface{}); ok {
-			convertReasoningInChoices(choices)
+		if cs, ok := chunk["choices"].([]interface{}); ok {
+			convertReasoningInChoices(cs)
 		}
-
 		out, _ := json.Marshal(chunk)
 		fmt.Fprintf(w, "data: %s\n\n", string(out))
 		flusher.Flush()
 	}
-
-	if err := scanner.Err(); err != nil && err != io.EOF {
-		log.Printf("[ERROR] Stream scan: %v", err)
+	if err := sc.Err(); err != nil && err != io.EOF {
+		log.Printf("[ERROR] Stream: %v", err)
 	}
 }
 
-// handleNonStream processes non-streaming JSON response
-func (p *Proxy) handleNonStream(w http.ResponseWriter, upstream *http.Response) {
-	body, err := io.ReadAll(upstream.Body)
+func (p *Proxy) handleNonStream(w http.ResponseWriter, up *http.Response) {
+	body, err := io.ReadAll(up.Body)
 	if err != nil {
-		p.writeError(w, http.StatusBadGateway, "Failed to read upstream response")
+		p.writeError(w, http.StatusBadGateway, "Read error")
 		return
 	}
-
-	p.debugf("ClinePass response: %s", string(body))
-
+	p.debugf("Response: %s", string(body))
 	var resp map[string]interface{}
 	if err := json.Unmarshal(body, &resp); err != nil {
-		// Can't parse - pass through raw
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(body)
 		return
 	}
-
-	// Convert reasoning fields in message
-	if choices, ok := resp["choices"].([]interface{}); ok {
-		convertReasoningInChoices(choices)
+	if cs, ok := resp["choices"].([]interface{}); ok {
+		convertReasoningInChoices(cs)
 	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
 
-// HandleModels returns the ClinePass model catalog with full metadata
 func (p *Proxy) HandleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ModelList{
-		Object: "list",
-		Data:   ClinePassModels,
-	})
+	json.NewEncoder(w).Encode(ModelList{Object: "list", Data: ClinePassModels})
 }
 
-// HandleHealth returns service health status
 func (p *Proxy) HandleHealth(version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","version":"%s"}`, version)
+		fmt.Fprintf(w, `{"status":"ok","version":"%s","thinking_lang":"%s"}`, version, p.ThinkingLang)
 	}
 }
 
-func (p *Proxy) writeError(w http.ResponseWriter, status int, message string) {
+func (p *Proxy) writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(ErrorResponse{
-		Error: ErrorDetail{
-			Message: message,
-			Type:    "invalid_request_error",
-		},
-	})
+	json.NewEncoder(w).Encode(ErrorResponse{Error: ErrorDetail{Message: msg, Type: "error"}})
 }

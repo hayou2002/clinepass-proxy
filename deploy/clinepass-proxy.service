@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/opt/clinepass-proxy
-ExecStart=/opt/clinepass-proxy/clinepass-proxy -api-key YOUR_API_KEY -host 0.0.0.0 -port 55991
+ExecStart=/opt/clinepass-proxy/clinepass-proxy -api-key sk_0321fc3ac1091cec9714a35e2c8ede1e8943f29a531cb0687fdc96f50f2a7c4c -host 0.0.0.0 -port 55991 -thinking-lang zh
 Restart=always
 RestartSec=5
 

@@ -17,6 +17,7 @@ func main() {
 	port := flag.Int("port", 55991, "Listen port")
 	apiKey := flag.String("api-key", "", "ClinePass API Key (server-side, overrides client header)")
 	debug := flag.Bool("debug", false, "Enable debug logging")
+	thinkingLang := flag.String("thinking-lang", "zh", "Thinking language: zh (default) or en")
 	showVersion := flag.Bool("version", false, "Show version and exit")
 	flag.Parse()
 
@@ -25,7 +26,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	proxy := internal.NewProxy(*apiKey, *debug)
+	proxy := internal.NewProxy(*apiKey, *debug, *thinkingLang)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", proxy.HandleChatCompletions)
@@ -55,6 +56,7 @@ func main() {
 	fmt.Printf("║  ClinePass Proxy v%-7s               ║\n", version)
 	fmt.Println("╠══════════════════════════════════════════╣")
 	fmt.Printf("║  Address:        %-24s║\n", addr)
+	fmt.Printf("║  Thinking Lang:  %-24s║\n", *thinkingLang)
 	fmt.Printf("║  Debug:          %-24v║\n", *debug)
 	keyDisplay := "(use client header)"
 	if *apiKey != "" && len(*apiKey) > 8 {
@@ -63,10 +65,10 @@ func main() {
 		keyDisplay = "(set)"
 	}
 	fmt.Printf("║  API Key:        %-24s║\n", keyDisplay)
-	fmt.Printf("║  Reasoning:      %-24s║\n", "medium (client override)")
 	fmt.Println("╠══════════════════════════════════════════╣")
-	fmt.Println("║  10 ClinePass models                     ║")
-	fmt.Println("║  reasoning | vision | tools | video      ║")
+	fmt.Println("║  Models: 10 ClinePass models available   ║")
+	fmt.Println("║  Features: reasoning | vision | tools    ║")
+	fmt.Println("║            video | thinking              ║")
 	fmt.Println("╚══════════════════════════════════════════╝")
 
 	log.Fatal(http.ListenAndServe(addr, mux))
