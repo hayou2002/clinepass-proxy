@@ -1,0 +1,14 @@
+[Unit]
+Description=ClinePass Proxy v2 - OpenAI compatible API proxy for ClinePass
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/clinepass-proxy
+ExecStart=/opt/clinepass-proxy/clinepass-proxy -api-key YOUR_API_KEY -host 0.0.0.0 -port 55991
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
