@@ -3,3 +3,9 @@ logs/
 *.exe
 *.pid
 proxy-config.json
+deploy/b64.txt
+deploy/test-*
+deploy/*.py
+deploy/*.ps1
+deploy/*.bat
+deploy/ssh.*
