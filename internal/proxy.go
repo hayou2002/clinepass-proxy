@@ -24,6 +24,8 @@ type Proxy struct {
 	Debug        bool
 	ThinkingLang string
 	Client       *http.Client
+	Pool         *KeyPoolConfig
+	Models       *ModelManager
 }
 
 func NewProxy(apiKey string, debug bool, thinkingLang string) *Proxy {
@@ -125,18 +127,7 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	apiKey := p.APIKey
-	if apiKey == "" {
-		if ck := r.Header.Get("Authorization"); ck != "" {
-			apiKey = strings.TrimPrefix(ck, "Bearer ")
-			apiKey = strings.TrimSpace(apiKey)
-		}
-	}
-	if apiKey == "" {
-		p.writeError(w, http.StatusUnauthorized, "API key required")
-		return
-	}
-
+	// Read and parse request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		p.writeError(w, http.StatusBadRequest, "Failed to read body")
@@ -159,33 +150,105 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	finalBody, _ := json.Marshal(reqMap)
 	p.debugf("Forward: %s", string(finalBody))
+	bodyReader := bytes.NewReader(finalBody)
 
-	upReq, _ := http.NewRequestWithContext(r.Context(), "POST",
-		clinepassBaseURL+"/chat/completions", bytes.NewReader(finalBody))
-	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("Authorization", "Bearer "+apiKey)
-	upReq.Header.Set("Accept", "text/event-stream")
+	// Determine how to get API key and handle retries
+	maxAttempts := 1
+	if p.Pool != nil && len(p.Pool.Keys) > 0 {
+		maxAttempts = len(p.Pool.Keys) + 1
+	}
 
-	upResp, err := p.Client.Do(upReq)
-	if err != nil {
-		p.writeError(w, http.StatusBadGateway, "Upstream error: "+err.Error())
+	var lastErr string
+	var usedKeyID int
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Get API key from pool or single key
+		var apiKey string
+		var keyEntry *PoolEntry
+
+		if p.Pool != nil && len(p.Pool.Keys) > 0 {
+			apiKey = p.Pool.NextKey()
+			if apiKey == "" {
+				p.writeError(w, http.StatusServiceUnavailable,
+					"All ClinePass keys are exhausted or in cooldown")
+				return
+			}
+			keyEntry = p.Pool.FindKeyByValue(apiKey)
+			if keyEntry != nil {
+				usedKeyID = keyEntry.ID
+			}
+		} else {
+			apiKey = p.APIKey
+			if apiKey == "" {
+				if ck := r.Header.Get("Authorization"); ck != "" {
+					apiKey = strings.TrimPrefix(ck, "Bearer ")
+					apiKey = strings.TrimSpace(apiKey)
+				}
+			}
+			if apiKey == "" {
+				p.writeError(w, http.StatusUnauthorized, "API key required")
+				return
+			}
+		}
+
+		bodyReader.Seek(0, 0)
+
+		upReq, _ := http.NewRequestWithContext(r.Context(), "POST",
+			clinepassBaseURL+"/chat/completions", bodyReader)
+		upReq.Header.Set("Content-Type", "application/json")
+		upReq.Header.Set("Authorization", "Bearer "+apiKey)
+		upReq.Header.Set("Accept", "text/event-stream")
+
+		upResp, err := p.Client.Do(upReq)
+		if err != nil {
+			lastErr = "Upstream error: " + err.Error()
+			log.Printf("[ERROR] %s", lastErr)
+			if keyEntry != nil {
+				p.Pool.MarkFailed(usedKeyID)
+			}
+			continue
+		}
+
+		// Check for auth/balance errors that warrant key rotation
+		if upResp.StatusCode == 401 || upResp.StatusCode == 402 {
+			errBody, _ := io.ReadAll(upResp.Body)
+			upResp.Body.Close()
+			lastErr = fmt.Sprintf("ClinePass %d: %s", upResp.StatusCode, string(errBody))
+			log.Printf("[ERROR] %s", lastErr)
+			if keyEntry != nil {
+				p.Pool.MarkFailed(usedKeyID)
+			}
+			if attempt < maxAttempts-1 {
+				log.Printf("[POOL] Retrying with next key (attempt %d/%d)", attempt+2, maxAttempts)
+				continue
+			}
+			p.writeError(w, upResp.StatusCode, "ClinePass error: "+string(errBody))
+			return
+		}
+
+		if upResp.StatusCode != http.StatusOK {
+			errBody, _ := io.ReadAll(upResp.Body)
+			upResp.Body.Close()
+			log.Printf("[ERROR] ClinePass %d: %s", upResp.StatusCode, string(errBody))
+			p.writeError(w, upResp.StatusCode, "ClinePass error: "+string(errBody))
+			return
+		}
+
+		// Success - mark key as good
+		if keyEntry != nil {
+			p.Pool.MarkSuccess(usedKeyID)
+		}
+
+		isStream, _ := reqMap["stream"].(bool)
+		if isStream {
+			p.handleStream(w, r, upResp)
+		} else {
+			p.handleNonStream(w, upResp)
+		}
 		return
 	}
-	defer upResp.Body.Close()
 
-	if upResp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(upResp.Body)
-		log.Printf("[ERROR] ClinePass %d: %s", upResp.StatusCode, string(errBody))
-		p.writeError(w, upResp.StatusCode, "ClinePass error: "+string(errBody))
-		return
-	}
-
-	isStream, _ := reqMap["stream"].(bool)
-	if isStream {
-		p.handleStream(w, r, upResp)
-	} else {
-		p.handleNonStream(w, upResp)
-	}
+	p.writeError(w, http.StatusBadGateway, lastErr)
 }
 
 func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, up *http.Response) {
@@ -257,7 +320,12 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, up *http.Response) {
 
 func (p *Proxy) HandleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(ModelList{Object: "list", Data: ClinePassModels})
+	all := make([]Model, len(ClinePassModels))
+	copy(all, ClinePassModels)
+	if p.Models != nil {
+		all = p.Models.AllModels()
+	}
+	json.NewEncoder(w).Encode(ModelList{Object: "list", Data: all})
 }
 
 func (p *Proxy) HandleHealth(version string) http.HandlerFunc {

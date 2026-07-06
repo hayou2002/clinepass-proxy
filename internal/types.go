@@ -41,6 +41,7 @@ type Model struct {
 	InputPrice      float64  `json:"input_price_per_million"`
 	OutputPrice     float64  `json:"output_price_per_million"`
 	CachedReadPrice float64  `json:"cached_read_price_per_million"`
+	MaxOutput       int      `json:"max_output,omitempty"`
 	Tags            []string `json:"tags,omitempty"`
 }
 
