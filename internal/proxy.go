@@ -151,6 +151,7 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	finalBody, _ := json.Marshal(reqMap)
 	p.debugf("Forward: %s", string(finalBody))
 	bodyReader := bytes.NewReader(finalBody)
+	isStream, _ := reqMap["stream"].(bool)
 
 	// Determine how to get API key and handle retries
 	maxAttempts := 1
@@ -197,7 +198,11 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			clinepassBaseURL+"/chat/completions", bodyReader)
 		upReq.Header.Set("Content-Type", "application/json")
 		upReq.Header.Set("Authorization", "Bearer "+apiKey)
-		upReq.Header.Set("Accept", "text/event-stream")
+		if isStream {
+			upReq.Header.Set("Accept", "text/event-stream")
+		} else {
+			upReq.Header.Set("Accept", "application/json")
+		}
 
 		upResp, err := p.Client.Do(upReq)
 		if err != nil {
@@ -239,7 +244,6 @@ func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			p.Pool.MarkSuccess(usedKeyID)
 		}
 
-		isStream, _ := reqMap["stream"].(bool)
 		if isStream {
 			p.handleStream(w, r, upResp)
 		} else {
@@ -286,6 +290,9 @@ func (p *Proxy) handleStream(w http.ResponseWriter, r *http.Request, up *http.Re
 			flusher.Flush()
 			continue
 		}
+		if data, ok := chunk["data"].(map[string]interface{}); ok {
+			chunk = data
+		}
 		if cs, ok := chunk["choices"].([]interface{}); ok {
 			convertReasoningInChoices(cs)
 		}
@@ -310,6 +317,9 @@ func (p *Proxy) handleNonStream(w http.ResponseWriter, up *http.Response) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write(body)
 		return
+	}
+	if data, ok := resp["data"].(map[string]interface{}); ok {
+		resp = data
 	}
 	if cs, ok := resp["choices"].([]interface{}); ok {
 		convertReasoningInChoices(cs)

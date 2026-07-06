@@ -106,6 +106,11 @@ func (kp *KeyPoolConfig) load() {
 func (kp *KeyPoolConfig) Save() error {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
+	return kp.saveLocked()
+}
+
+// saveLocked writes config to disk. Caller must hold kp.mu.
+func (kp *KeyPoolConfig) saveLocked() error {
 	kp.dirty = false
 	data, err := json.MarshalIndent(kp, "", "  ")
 	if err != nil {
@@ -125,8 +130,15 @@ func lastSlash(s string) int {
 }
 
 func (kp *KeyPoolConfig) saveIfDirty() {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	kp.saveIfDirtyLocked()
+}
+
+// saveIfDirtyLocked saves config when dirty. Caller must hold kp.mu.
+func (kp *KeyPoolConfig) saveIfDirtyLocked() {
 	if kp.dirty {
-		if err := kp.Save(); err != nil {
+		if err := kp.saveLocked(); err != nil {
 			log.Printf("[POOL] Save error: %v", err)
 		}
 	}
@@ -148,7 +160,7 @@ func nextMonday() time.Time {
 func (kp *KeyPoolConfig) NextKey() string {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
-	defer kp.saveIfDirty()
+	defer kp.saveIfDirtyLocked()
 
 	if len(kp.Keys) == 0 {
 		return ""
@@ -204,7 +216,7 @@ func (kp *KeyPoolConfig) NextKey() string {
 func (kp *KeyPoolConfig) MarkFailed(keyID int) {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
-	defer kp.saveIfDirty()
+	defer kp.saveIfDirtyLocked()
 
 	for _, entry := range kp.Keys {
 		if entry.ID == keyID {
@@ -235,6 +247,7 @@ func (kp *KeyPoolConfig) MarkFailed(keyID int) {
 func (kp *KeyPoolConfig) MarkSuccess(keyID int) {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
+	defer kp.saveIfDirtyLocked()
 
 	for _, entry := range kp.Keys {
 		if entry.ID == keyID {
@@ -266,6 +279,8 @@ func (kp *KeyPoolConfig) FindKeyByValue(key string) *PoolEntry {
 // ============================================================
 
 func (kp *KeyPoolConfig) IsModelHidden(id string) bool {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
 	for _, h := range kp.HiddenModels {
 		if h == id {
 			return true
@@ -275,49 +290,62 @@ func (kp *KeyPoolConfig) IsModelHidden(id string) bool {
 }
 
 func (kp *KeyPoolConfig) HideModel(id string) {
-	if kp.IsModelHidden(id) {
-		return
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	defer kp.saveIfDirtyLocked()
+	for _, h := range kp.HiddenModels {
+		if h == id {
+			return
+		}
 	}
 	kp.HiddenModels = append(kp.HiddenModels, id)
 	kp.dirty = true
-	kp.saveIfDirty()
 }
 
 func (kp *KeyPoolConfig) UnhideModel(id string) {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	defer kp.saveIfDirtyLocked()
 	for i, h := range kp.HiddenModels {
 		if h == id {
 			kp.HiddenModels = append(kp.HiddenModels[:i], kp.HiddenModels[i+1:]...)
 			kp.dirty = true
-			kp.saveIfDirty()
 			return
 		}
 	}
 }
 
 func (kp *KeyPoolConfig) GetModelOverride(id string) (Model, bool) {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
 	m, ok := kp.ModelOverrides[id]
 	return m, ok
 }
 
 func (kp *KeyPoolConfig) SetModelOverride(id string, m Model) {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	defer kp.saveIfDirtyLocked()
 	if kp.ModelOverrides == nil {
 		kp.ModelOverrides = make(map[string]Model)
 	}
 	kp.ModelOverrides[id] = m
 	kp.dirty = true
-	kp.saveIfDirty()
 }
 
 func (kp *KeyPoolConfig) RemoveModelOverride(id string) {
+	kp.mu.Lock()
+	defer kp.mu.Unlock()
+	defer kp.saveIfDirtyLocked()
 	delete(kp.ModelOverrides, id)
 	kp.dirty = true
-	kp.saveIfDirty()
 }
 
 // AddKey adds a new key to the pool
 func (kp *KeyPoolConfig) AddKey(key, note string) *PoolEntry {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
+	defer kp.saveIfDirtyLocked()
 
 	maxID := 0
 	for _, entry := range kp.Keys {
@@ -343,6 +371,7 @@ func (kp *KeyPoolConfig) AddKey(key, note string) *PoolEntry {
 func (kp *KeyPoolConfig) RemoveKey(id int) bool {
 	kp.mu.Lock()
 	defer kp.mu.Unlock()
+	defer kp.saveIfDirtyLocked()
 
 	for i, entry := range kp.Keys {
 		if entry.ID == id {
