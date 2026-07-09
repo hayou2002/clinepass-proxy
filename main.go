@@ -8,11 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/hayou2002/clinepass-proxy/internal"
 )
 
-const version = "3.0.0"
+const version = "3.1.0"
 
 func main() {
 	host := flag.String("host", "127.0.0.1", "Bind address (0.0.0.0 for LAN access)")
@@ -22,6 +23,7 @@ func main() {
 	thinkingLang := flag.String("thinking-lang", "zh", "Thinking language: zh or en")
 	configPath := flag.String("config", "data/config.json", "Config file path (for pool mode)")
 	showVersion := flag.Bool("version", false, "Show version and exit")
+	healthCheckInterval := flag.Duration("health-interval", 30*time.Second, "Health check polling interval (random jitter ±10s)")
 	flag.Parse()
 
 	if *showVersion {
@@ -49,6 +51,11 @@ func main() {
 		Host:         *host,
 		Port:         *port,
 	}
+
+	// Start health checker
+	health := internal.NewHealthChecker(*healthCheckInterval)
+	proxy.Health = health
+	health.Start()
 
 	// Setup HTTP routes
 	mux := http.NewServeMux()
@@ -88,6 +95,7 @@ func main() {
 		fmt.Printf("║  Fallback Key:   %-35s║\n", (*apiKey)[:8]+"...")
 	}
 	fmt.Printf("║  Debug:          %-35v║\n", *debug)
+	fmt.Printf("║  Health Check:   %-35v║\n", *healthCheckInterval)
 	fmt.Println("╠══════════════════════════════════════════════════╣")
 	fmt.Println("║  Endpoints:                                     ║")
 	fmt.Printf("║  POST %-41s║\n", addr+"/v1/chat/completions")
@@ -105,6 +113,7 @@ func main() {
 		if pool != nil {
 			pool.Save()
 		}
+		health.Stop()
 		os.Exit(0)
 	}()
 

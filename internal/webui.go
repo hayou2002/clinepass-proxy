@@ -34,6 +34,27 @@ func (as *AdminServer) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/api/keys/test", as.handleKeysTest)
 	mux.HandleFunc("/admin/api/models", as.handleModelsAPI)
 	mux.HandleFunc("/admin/api/settings", as.handleSettingsAPI)
+	mux.HandleFunc("/admin/api/health", as.handleHealthAPI)
+}
+
+func (as *AdminServer) handleHealthAPI(w http.ResponseWriter, r *http.Request) {
+	if !as.checkAuth(r) {
+		http.Error(w, `{"error":"unauthorized"}`, 401)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	switch r.Method {
+	case "GET":
+		info := as.Proxy.Health.GetCheckInfo()
+		json.NewEncoder(w).Encode(info)
+	case "POST":
+		// Re-enable health check
+		as.Proxy.Health.ReEnable()
+		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "state": "up"})
+	default:
+		http.Error(w, `{"error":"method not allowed"}`, 405)
+	}
 }
 
 func (as *AdminServer) checkAuth(r *http.Request) bool {
@@ -462,14 +483,15 @@ pre{background:var(--pre);padding:8px;border-radius:4px;font-size:12px;overflow-
 <input id="lp" type="password" placeholder="密码" onkeydown="if(event.key==='Enter')lg()">
 <button class="btn btn-primary" onclick="lg()" style="width:100%" id="lb">登录</button>
 </div>
-<div class="v">v3.0.0</div>
+<div class="v">v3.1.0</div>
 </div>
 
-<h1>ClinePass Proxy<span class="sub">v3.0.0</span></h1>
+<h1>ClinePass Proxy<span class="sub">v3.1.0</span></h1>
 <div class="nav">
 <button class="active" onclick="st('keys')">Key 管理 ({{.CooldownHour}}h轮换)</button>
 <button onclick="st('models')">模型管理</button>
 <button onclick="st('settings')">设置</button>
+<button onclick="st('health')">健康检测</button>
 <span class="sp"></span>
 <button onclick="td()" title="切换深色模式" id="db">深色</button>
 <button onclick="lo2()" title="退出登录">退出</button>
@@ -514,6 +536,22 @@ pre{background:var(--pre);padding:8px;border-radius:4px;font-size:12px;overflow-
 <h3>所有模型 <span id="mc2" class="text-muted text-sm"></span></h3>
 <div class="search"><input id="ms" type="text" placeholder="搜索模型名称或 ID..." oninput="fm()"></div>
 <div id="ml" class="grid"></div>
+</div>
+</div>
+
+<div id="ph" class="panel">
+<div class="card">
+<h3>上游健康状态</h3>
+<div id="hs" style="display:flex;align-items:center;gap:12px;margin-bottom:10px">
+<span id="hst" class="tag">检测中...</span>
+<span id="hsw" class="text-muted text-sm"></span>
+<button id="hre" class="btn btn-primary btn-sm" style="display:none" onclick="re()">🔄 手动重新开启</button>
+</div>
+<pre id="hdt" style="font-size:12px;white-space:pre-wrap">等待首次检测...</pre>
+</div>
+<div class="card">
+<h3>检测日志</h3>
+<pre id="hlg" style="max-height:300px;overflow-y:auto;font-size:11px">(启动后自动记录)</pre>
 </div>
 </div>
 
@@ -570,7 +608,7 @@ async function lg(){const p=document.getElementById('lp').value;if(!p)return;con
 async function lo2(){await fetch('/admin/api/logout',{method:'POST'});location.reload()}
 function td(){const d=document.body.classList.toggle('dark');localStorage.setItem('cpd',d?'1':'0');document.getElementById('db').textContent=d?'浅色':'深色'}
 (function(){if(localStorage.getItem('cpd')==='1'){document.body.classList.add('dark');document.getElementById('db').textContent='浅色'}})()
-function st(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('p'+n[0]).classList.add('active');document.querySelectorAll('.nav button:not(.sp)').forEach(b=>b.classList.remove('active'));[['keys','models','settings'].indexOf(n)].forEach(i=>{if(i>=0)document.querySelectorAll('.nav button:not(.sp)')[i].classList.add('active')})}
+function st(n){document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));document.getElementById('p'+n[0]).classList.add('active');document.querySelectorAll('.nav button:not(.sp)').forEach(b=>b.classList.remove('active'));const tabs=['keys','models','settings','health'];const idx=tabs.indexOf(n);if(idx>=0&&idx<document.querySelectorAll('.nav button:not(.sp)').length)document.querySelectorAll('.nav button:not(.sp)')[idx].classList.add('active')}
 function sd(s){return '<span class="sdot '+(s==='active'?'sg':s==='cooldown'?'sy':'sr')+'"></span>'}
 async function lk(){const r=await api('/admin/api/keys');if(!r||!r.keys)return;document.getElementById('kc').textContent='('+r.total+')';document.getElementById('kl').innerHTML=r.keys.map(k=>'<tr><td>'+k.id+'</td><td><code>'+k.key_prefix+'</code></td><td>'+sd(k.status)+k.status_label+'</td><td>'+(k.note||'-')+'</td><td class="text-muted">'+(k.last_used||'-')+'</td><td class="text-muted">'+(k.last_failed||'-')+'</td><td>'+k.fail_count+'</td><td><button class="btn btn-danger btn-sm" onclick="dk('+k.id+')">删除</button></td></tr>').join('')}
 async function addKey(){const k=document.getElementById('nk').value.trim();if(!k){alert('请输入 Key');return}const n=document.getElementById('nn').value.trim();const r=await api('/admin/api/keys',{method:'POST',body:JSON.stringify({key:k,note:n})});if(r&&r.ok){document.getElementById('nk').value='';document.getElementById('nn').value='';lk()}else alert(r.error||'添加失败')}
@@ -598,7 +636,27 @@ async function cp(){const op=document.getElementById('opw').value;const np=docum
 if(np!==cp){alert('两次新密码不一致');return}
 if(np.length<4){alert('新密码至少4位');return}
 const r=await api('/admin/api/settings',{method:'PUT',body:JSON.stringify({old_password:op,new_password:np})});if(r&&r.ok){alert('密码已修改');document.getElementById('opw').value='';document.getElementById('npw').value='';document.getElementById('cpw').value=''}else alert(r.error||'修改失败')}
-if(!document.getElementById('lo').classList.contains('hide')){document.getElementById('lp').focus()}else{lk();lm()}
+async function lh(){const r=await api('/admin/api/health');if(!r)return;
+const st=r.state==='up'?'可用':'不可用';
+const sc=r.state==='up'?'tag-ok':'tag-err';
+const si=r.state==='up'?'✅':'❌';
+document.getElementById('hst').className='tag '+sc;
+document.getElementById('hst').textContent=si+' '+st;
+document.getElementById('hsw').textContent=r.window.length+'/'+r.window_size+' 次检测 | 失败阈值 '+r.fail_threshold+'/'+r.window_size;
+const reBtn=document.getElementById('hre');
+reBtn.style.display=r.state==='down'?'inline-block':'none';
+let dt='检测频率: 每 '+r.interval_sec+' 秒 | 上游: '+r.upstream_url+'\n';
+dt+='检测窗口: ['+r.window.join(', ')+'] | 通过: '+r.pass_count+' 失败: '+r.fail_count+'\n';
+let lg='';const d=new Date();const ts=d.toLocaleTimeString();
+lg+=ts+' ['+r.state.toUpperCase()+'] 窗口='+JSON.stringify(r.window)+' 通过='+r.pass_count+' 失败='+r.fail_count+'\n';
+const el=document.getElementById('hlg');
+const prev=el.textContent;
+if(prev.startsWith('(启动后自动记录)'))el.textContent=lg;
+else el.textContent=(lg+prev).split('\n').slice(0,50).join('\n');
+document.getElementById('hdt').textContent=dt;}
+async function re(){const r=await api('/admin/api/health',{method:'POST'});if(r&&r.ok){lh();document.getElementById('hre').style.display='none';alert('已重新开启上游检测')}}
+
+if(!document.getElementById('lo').classList.contains('hide')){document.getElementById('lp').focus()}else{lk();lm();lh();setInterval(lh,5000)}
 </script>
 </body>
 </html>`

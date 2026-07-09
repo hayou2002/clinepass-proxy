@@ -26,6 +26,7 @@ type Proxy struct {
 	Client       *http.Client
 	Pool         *KeyPoolConfig
 	Models       *ModelManager
+	Health       *HealthChecker
 }
 
 func NewProxy(apiKey string, debug bool, thinkingLang string) *Proxy {
@@ -124,6 +125,12 @@ func injectThinkingLanguage(m map[string]interface{}, lang string) {
 func (p *Proxy) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		p.writeError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	// Health gate — refuse when upstream is confirmed down
+	if p.Health != nil && !p.Health.IsAvailable() {
+		p.writeError(w, http.StatusServiceUnavailable, "Upstream ClinePass API is unavailable (health check). Use admin panel to re-enable.")
 		return
 	}
 
@@ -341,7 +348,13 @@ func (p *Proxy) HandleModels(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) HandleHealth(version string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, `{"status":"ok","version":"%s","thinking_lang":"%s"}`, version, p.ThinkingLang)
+		if p.Health != nil {
+			info := p.Health.GetCheckInfo()
+			fmt.Fprintf(w, `{"status":"%s","version":"%s","thinking_lang":"%s","upstream":"%s"}`,
+				info["state"], version, p.ThinkingLang, info["upstream_url"])
+		} else {
+			fmt.Fprintf(w, `{"status":"ok","version":"%s","thinking_lang":"%s"}`, version, p.ThinkingLang)
+		}
 	}
 }
 
