@@ -1,0 +1,15 @@
+[Unit]
+Description=ClinePass Proxy - Multi Key Round Robin
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/clinepass-proxy
+ExecStart=/opt/clinepass-proxy/venv/bin/python /opt/clinepass-proxy/app.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

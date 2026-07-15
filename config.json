@@ -1,0 +1,8 @@
+{
+  "host": "0.0.0.0",
+  "port": 55991,
+  "cline_api_base": "https://api.cline.bot",
+  "cooldown_seconds": 300,
+  "health_check_interval": 60,
+  "debug": false
+}
